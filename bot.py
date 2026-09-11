@@ -11,6 +11,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
+DETECTED_CHANNEL_ID = None
 
 DATA_FILE = "data.json"
 
