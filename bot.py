@@ -183,7 +183,8 @@ async def member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_data(data)
 
-
+async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("CHANNEL ID:", update.effective_chat.id)
 async def health(request):
     return web.Response(text="Bot is running!")
 
