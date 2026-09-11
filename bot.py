@@ -218,7 +218,7 @@ async def main():
 
     print(f"Bot is running on port {port}")
 
-    await application.updater.wait()
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
