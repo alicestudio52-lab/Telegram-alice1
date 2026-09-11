@@ -195,7 +195,7 @@ async def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-application.add_handler(
+    application.add_handler(
     MessageHandler(filters.UpdateType.CHANNEL_POST, channel_post)
 )
     application.add_handler(
