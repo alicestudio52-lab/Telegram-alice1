@@ -3,17 +3,16 @@ import json
 import asyncio
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ChatMemberHandler,
     ContextTypes,
 )
 
 # ============================================================
 # הגדרות מערכת
-# בדרך כלל אין צורך לגעת כאן
 # ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -25,13 +24,14 @@ DATA_FILE = "data.json"
 # ============================================================
 # הודעות
 #
-# בעתיד, אם תרצה לשנות את הטקסטים של הבוט,
+# בעתיד, אם תרצה לשנות את הטקסטים,
 # תצטרך לערוך רק את החלק הזה.
 #
 # אפשר להשתמש ב:
 # {link}  = הקישור האישי
-# {count} = מספר האנשים שהצטרפו
+# {count} = מספר האנשים שהתחילו דרך הקישור
 # ============================================================
+
 WELCOME_MESSAGE = """
 👋 היי, ברוך הבא למקום הפרטי של Alice ❤️
 
@@ -46,12 +46,12 @@ WELCOME_MESSAGE = """
 
 📊 ההתקדמות שלך: {count}/2
 
-אחרי ש-2 אנשים יצטרפו דרך הקישור שלך, תקבל גישה לתוכן האקסקלוסיבי של Alice. ✨
+אחרי ש-2 אנשים יתחילו צ'אט עם הבוט דרך הקישור שלך, תקבל גישה לתוכן האקסקלוסיבי של Alice. ✨
 """
 
 
 PROGRESS_MESSAGE = """
-🔥 מישהו הצטרף דרך הקישור שלך!
+🔥 מישהו התחיל צ'אט עם הבוט דרך הקישור שלך!
 
 ההזמנה נקלטה בהצלחה ❤️
 
@@ -83,14 +83,15 @@ Alice משתפת כאן תוכן אישי ואקסקלוסיבי שמיועד ל
 
 1️⃣ שתף את הקישור האישי שלך עם 2 אנשים חדשים.
 
-2️⃣ כשהם יצטרפו דרך הקישור שלך, ההתקדמות שלך תתעדכן אוטומטית.
+2️⃣ כל אדם שייכנס דרך הקישור שלך וילחץ Start ייחשב כהזמנה אחת.
 
-3️⃣ ברגע שמגיעים ל־2/2, תקבל קישור אישי לכניסה לתוכן.
+3️⃣ ברגע שמגיעים ל־2/2, תקבל קישור חד־פעמי לכניסה לקבוצה.
 
-🔒 כל קישור אישי מיועד לשימוש חד-פעמי.
+🔒 הקישור האישי שלך מוביל לבוט ולא לקבוצה.
 
 בהצלחה ❤️
 """
+
 
 # ============================================================
 # כפתורי הבוט
@@ -127,8 +128,7 @@ def get_main_keyboard():
 
 def empty_data():
     return {
-        "users": {},
-        "invite_links": {}
+        "users": {}
     }
 
 
@@ -144,7 +144,6 @@ def load_data():
             return empty_data()
 
         data.setdefault("users", {})
-        data.setdefault("invite_links", {})
 
         return data
 
@@ -168,43 +167,184 @@ def save_data(data):
 
 
 # ============================================================
-# יצירת / קבלת קישור אישי
+# יצירת קישור אישי לבוט
+#
+# זה כבר לא קישור לקבוצה.
+#
+# לדוגמה:
+# https://t.me/AliceBot?start=ref_123456789
 # ============================================================
 
-async def get_personal_invite_link(
+async def get_personal_link(
     context: ContextTypes.DEFAULT_TYPE,
-    user_id: str,
-    data: dict
+    user_id: str
 ):
-    # בודקים האם כבר קיים למשתמש קישור
-    for link, inviter_id in data["invite_links"].items():
-        if str(inviter_id) == user_id:
-            return link
+    bot_info = await context.bot.get_me()
 
-    # אם אין קישור - יוצרים קישור חדש
-    invite = await context.bot.create_chat_invite_link(
-        chat_id=CHANNEL_ID,
-        name=f"ref_{user_id}"
-    )
+    bot_username = bot_info.username
 
-    personal_link = invite.invite_link
+    if not bot_username:
+        raise RuntimeError("Bot username could not be detected")
 
-    data["invite_links"][personal_link] = user_id
-
-    return personal_link
+    return f"https://t.me/{bot_username}?start=ref_{user_id}"
 
 
 # ============================================================
-# יצירת קישור גישה חד-פעמי
+# יצירת קישור גישה חד-פעמי לקבוצה
+#
+# הקישור הזה נוצר רק אחרי 2/2
 # ============================================================
 
-async def create_access_link(context):
+async def create_access_link(
+    context: ContextTypes.DEFAULT_TYPE
+):
     access_link = await context.bot.create_chat_invite_link(
         chat_id=CHANNEL_ID,
         member_limit=1
     )
 
     return access_link.invite_link
+
+
+# ============================================================
+# הוספת משתמש חדש
+# ============================================================
+
+def create_user():
+    return {
+        "invited": [],
+        "completed": False,
+        "referred_by": None
+    }
+
+
+# ============================================================
+# עיבוד Referral
+#
+# אם משתמש חדש הגיע דרך:
+# /start ref_123456789
+#
+# אנחנו מזהים שהמזמין הוא 123456789
+# ומוסיפים את המשתמש החדש אליו.
+# ============================================================
+
+async def process_referral(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    data: dict,
+    new_user_id: str
+):
+    if not context.args:
+        return
+
+    referral_code = context.args[0]
+
+    if not referral_code.startswith("ref_"):
+        return
+
+    inviter_id = referral_code[4:]
+
+    if not inviter_id.isdigit():
+        return
+
+    inviter_id = str(inviter_id)
+
+    # משתמש לא יכול להזמין את עצמו
+    if inviter_id == new_user_id:
+        return
+
+    # המזמין חייב להיות משתמש קיים
+    if inviter_id not in data["users"]:
+        return
+
+    new_user_data = data["users"][new_user_id]
+
+    # משתמש שכבר הגיע בעבר לא יכול להיספר שוב
+    if new_user_data.get("referred_by") is not None:
+        return
+
+    inviter_data = data["users"][inviter_id]
+
+    # אם המזמין כבר השלים - לא מוסיפים עוד הזמנות
+    if inviter_data.get("completed", False):
+        return
+
+    invited_users = inviter_data.setdefault(
+        "invited",
+        []
+    )
+
+    # אותו משתמש לא יכול להיספר פעמיים
+    if new_user_id in invited_users:
+        return
+
+    # ========================================================
+    # ההזמנה התקבלה
+    # ========================================================
+
+    invited_users.append(new_user_id)
+
+    new_user_data["referred_by"] = inviter_id
+
+    count = len(invited_users)
+
+    # ========================================================
+    # הגיע ל־2/2
+    # ========================================================
+
+    if count >= 2:
+
+        inviter_data["completed"] = True
+
+        access_link = await create_access_link(context)
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(inviter_id),
+                text=SUCCESS_MESSAGE.format(
+                    link=access_link
+                ),
+                reply_markup=get_main_keyboard()
+            )
+
+        except Forbidden:
+            print(
+                f"User {inviter_id} blocked the bot. "
+                f"Could not send success message."
+            )
+
+        except Exception as error:
+            print(
+                "Could not send success message:",
+                error
+            )
+
+    # ========================================================
+    # עדיין לא הגיע ל־2
+    # ========================================================
+
+    else:
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(inviter_id),
+                text=PROGRESS_MESSAGE.format(
+                    count=count
+                ),
+                reply_markup=get_main_keyboard()
+            )
+
+        except Forbidden:
+            print(
+                f"User {inviter_id} blocked the bot. "
+                f"Could not send progress message."
+            )
+
+        except Exception as error:
+            print(
+                "Could not send progress message:",
+                error
+            )
 
 
 # ============================================================
@@ -220,7 +360,7 @@ async def start(
 
     if not CHANNEL_ID:
         await update.message.reply_text(
-            "הבוט עדיין לא מחובר לערוץ. נסה שוב מאוחר יותר."
+            "הבוט עדיין לא מחובר לקבוצה. נסה שוב מאוחר יותר."
         )
         return
 
@@ -228,54 +368,82 @@ async def start(
 
     data = load_data()
 
-    # אם המשתמש חדש - יוצרים לו רשומה
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "invited": [],
-            "completed": False
-        }
+    # ========================================================
+    # האם המשתמש חדש?
+    # ========================================================
+
+    is_new_user = user_id not in data["users"]
+
+    if is_new_user:
+        data["users"][user_id] = create_user()
 
     user_data = data["users"][user_id]
 
     # ========================================================
-    # המשתמש כבר השלים את המשימה
+    # אם זה משתמש חדש:
+    # קודם מעבדים את ה-referral
+    # ========================================================
+
+    if is_new_user:
+        await process_referral(
+            update,
+            context,
+            data,
+            user_id
+        )
+
+    # שומרים את הנתונים אחרי עיבוד ההזמנה
+    save_data(data)
+
+    # ========================================================
+    # אם המשתמש כבר השלים
     # ========================================================
 
     if user_data.get("completed", False):
 
         access_link = await create_access_link(context)
 
-        await update.message.reply_text(
-            "כבר השלמת את המשימה 🎉\n\n"
-            "הנה הקישור לערוץ:\n"
-            f"{access_link}",
-            reply_markup=get_main_keyboard()
-        )
+        try:
+            await update.message.reply_text(
+                "כבר השלמת את המשימה 🎉\n\n"
+                "הנה קישור כניסה חדש לקבוצה:\n"
+                f"{access_link}",
+                reply_markup=get_main_keyboard()
+            )
 
-        save_data(data)
+        except Forbidden:
+            print(
+                f"User {user_id} blocked the bot."
+            )
+
         return
 
     # ========================================================
     # המשתמש עדיין לא השלים
     # ========================================================
 
-    personal_link = await get_personal_invite_link(
+    personal_link = await get_personal_link(
         context,
-        user_id,
-        data
+        user_id
     )
 
-    count = len(user_data.get("invited", []))
-
-    await update.message.reply_text(
-        WELCOME_MESSAGE.format(
-            link=personal_link,
-            count=count
-        ),
-        reply_markup=get_main_keyboard()
+    count = len(
+        user_data.get("invited", [])
     )
 
-    save_data(data)
+    try:
+        await update.message.reply_text(
+            WELCOME_MESSAGE.format(
+                link=personal_link,
+                count=count
+            ),
+            reply_markup=get_main_keyboard()
+        )
+
+    except Forbidden:
+        print(
+            f"User {user_id} blocked the bot."
+        )
 
 
 # ============================================================
@@ -291,7 +459,18 @@ async def button_handler(
     if not query:
         return
 
-    await query.answer()
+    # ========================================================
+    # עונים מיד ל-Telegram
+    # כדי שהטעינה של הכפתור תיעלם
+    # ========================================================
+
+    try:
+        await query.answer()
+    except Exception as error:
+        print(
+            "Could not answer callback query:",
+            error
+        )
 
     user = query.from_user
 
@@ -299,9 +478,12 @@ async def button_handler(
         return
 
     if not CHANNEL_ID:
-        await query.message.reply_text(
-            "הבוט עדיין לא מחובר לערוץ."
-        )
+        try:
+            await query.message.reply_text(
+                "הבוט עדיין לא מחובר לקבוצה."
+            )
+        except Exception:
+            pass
         return
 
     user_id = str(user.id)
@@ -313,10 +495,7 @@ async def button_handler(
     # ========================================================
 
     if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "invited": [],
-            "completed": False
-        }
+        data["users"][user_id] = create_user()
 
     user_data = data["users"][user_id]
 
@@ -326,16 +505,20 @@ async def button_handler(
 
     if query.data == "my_link":
 
-        personal_link = await get_personal_invite_link(
+        personal_link = await get_personal_link(
             context,
-            user_id,
-            data
+            user_id
         )
 
-        await query.message.reply_text(
-            f"🔗 הקישור האישי שלך:\n\n"
-            f"{personal_link}"
-        )
+        try:
+            await query.message.reply_text(
+                f"🔗 הקישור האישי שלך:\n\n"
+                f"{personal_link}"
+            )
+        except Forbidden:
+            print(
+                f"User {user_id} blocked the bot."
+            )
 
     # ========================================================
     # 📊 ההתקדמות שלי
@@ -349,17 +532,27 @@ async def button_handler(
 
         if user_data.get("completed", False):
 
-            await query.message.reply_text(
-                "🎉 כבר השלמת את המשימה!\n\n"
-                "התקדמות: 2/2"
-            )
+            try:
+                await query.message.reply_text(
+                    "🎉 כבר השלמת את המשימה!\n\n"
+                    "התקדמות: 2/2"
+                )
+            except Forbidden:
+                print(
+                    f"User {user_id} blocked the bot."
+                )
 
         else:
 
-            await query.message.reply_text(
-                f"📊 ההתקדמות שלך:\n\n"
-                f"{count}/2"
-            )
+            try:
+                await query.message.reply_text(
+                    f"📊 ההתקדמות שלך:\n\n"
+                    f"{count}/2"
+                )
+            except Forbidden:
+                print(
+                    f"User {user_id} blocked the bot."
+                )
 
     # ========================================================
     # ℹ️ איך זה עובד?
@@ -367,175 +560,13 @@ async def button_handler(
 
     elif query.data == "how_it_works":
 
-        await query.message.reply_text(
-            HOW_IT_WORKS_MESSAGE
-        )
-
-    save_data(data)
-
-
-# ============================================================
-# זיהוי הצטרפות לערוץ
-# ============================================================
-
-async def member_update(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    chat_member = update.chat_member
-
-    if not chat_member:
-        return
-
-    # ========================================================
-    # מוודאים שהאירוע שייך לערוץ שלנו
-    # ========================================================
-
-    if not CHANNEL_ID:
-        return
-
-    if str(chat_member.chat.id) != str(CHANNEL_ID):
-        return
-
-    old_member = chat_member.old_chat_member
-    new_member = chat_member.new_chat_member
-
-    # ========================================================
-    # בודקים שהמשתמש באמת הפך לחבר
-    # ========================================================
-
-    if new_member.status not in (
-        "member",
-        "administrator"
-    ):
-        return
-
-    # אם הוא כבר היה חבר - לא סופרים אותו שוב
-    if old_member.status in (
-        "member",
-        "administrator"
-    ):
-        return
-
-    new_user = new_member.user
-
-    # לא סופרים בוטים
-    if new_user.is_bot:
-        return
-
-    # ========================================================
-    # חייב להיות קישור הזמנה
-    # ========================================================
-
-    invite_link = chat_member.invite_link
-
-    if not invite_link:
-        return
-
-    invite_url = invite_link.invite_link
-
-    data = load_data()
-
-    # ========================================================
-    # מזהים למי שייך הקישור
-    # ========================================================
-
-    inviter_id = data["invite_links"].get(invite_url)
-
-    if not inviter_id:
-        return
-
-    inviter_id = str(inviter_id)
-    new_user_id = str(new_user.id)
-
-    # ========================================================
-    # משתמש לא יכול להזמין את עצמו
-    # ========================================================
-
-    if inviter_id == new_user_id:
-        return
-
-    # ========================================================
-    # המזמין חייב להיות רשום
-    # ========================================================
-
-    if inviter_id not in data["users"]:
-        return
-
-    inviter_data = data["users"][inviter_id]
-
-    # ========================================================
-    # אם המזמין כבר השלים - לא מוסיפים עוד אנשים
-    # ========================================================
-
-    if inviter_data.get("completed", False):
-        return
-
-    invited_users = inviter_data.setdefault(
-        "invited",
-        []
-    )
-
-    # ========================================================
-    # אותו אדם לא יכול להיספר פעמיים
-    # ========================================================
-
-    if new_user_id in invited_users:
-        return
-
-    # ========================================================
-    # מוסיפים את המשתמש החדש
-    # ========================================================
-
-    invited_users.append(new_user_id)
-
-    count = len(invited_users)
-
-    # ========================================================
-    # הגיע ל-2
-    # ========================================================
-
-    if count >= 2:
-
-        inviter_data["completed"] = True
-
-        # יוצרים קישור כניסה חד-פעמי לערוץ
-        access_link = await create_access_link(context)
-
         try:
-            await context.bot.send_message(
-                chat_id=int(inviter_id),
-                text=SUCCESS_MESSAGE.format(
-                    link=access_link
-                ),
-                reply_markup=get_main_keyboard()
+            await query.message.reply_text(
+                HOW_IT_WORKS_MESSAGE
             )
-
-        except Exception as error:
+        except Forbidden:
             print(
-                "Could not send success message:",
-                error
-            )
-
-    # ========================================================
-    # עדיין לא הגיע ל-2
-    # ========================================================
-
-    else:
-
-        try:
-            await context.bot.send_message(
-                chat_id=int(inviter_id),
-                text=PROGRESS_MESSAGE.format(
-                    count=count
-                ),
-                reply_markup=get_main_keyboard()
-            )
-
-        except Exception as error:
-            print(
-                "Could not send progress message:",
-                error
+                f"User {user_id} blocked the bot."
             )
 
     save_data(data)
@@ -596,17 +627,6 @@ async def main():
     )
 
     # ========================================================
-    # זיהוי הצטרפות לערוץ
-    # ========================================================
-
-    application.add_handler(
-        ChatMemberHandler(
-            member_update,
-            ChatMemberHandler.CHAT_MEMBER
-        )
-    )
-
-    # ========================================================
     # הפעלת Telegram
     # ========================================================
 
@@ -614,12 +634,11 @@ async def main():
     await application.start()
 
     await application.updater.start_polling(
-    allowed_updates=[
-        "message",
-        "chat_member",
-        "callback_query"
-    ]
-)
+        allowed_updates=[
+            "message",
+            "callback_query"
+        ]
+    )
 
     # ========================================================
     # שרת קטן עבור Render
@@ -660,6 +679,7 @@ async def main():
     # ========================================================
 
     try:
+
         await asyncio.Event().wait()
 
     finally:
