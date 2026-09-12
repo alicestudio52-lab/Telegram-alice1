@@ -2,10 +2,11 @@ import os
 import json
 import asyncio
 from aiohttp import web
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ChatMemberHandler,
     ContextTypes,
 )
@@ -57,6 +58,49 @@ SUCCESS_MESSAGE = """
 הנה הקישור האישי שלך לערוץ:
 {link}
 """
+
+HOW_IT_WORKS_MESSAGE = """
+ℹ️ איך זה עובד?
+
+1️⃣ שלח את הקישור האישי שלך לאנשים חדשים.
+
+2️⃣ כאשר מישהו מצטרף דרך הקישור שלך,
+ההתקדמות שלך עולה.
+
+3️⃣ אחרי ש-2 אנשים חדשים הצטרפו,
+תקבל גישה לערוץ.
+
+בהצלחה! 🚀
+"""
+
+
+# ============================================================
+# כפתורי הבוט
+# ============================================================
+
+def get_main_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔗 הקישור שלי",
+                callback_data="my_link"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 ההתקדמות שלי",
+                callback_data="my_progress"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ איך זה עובד?",
+                callback_data="how_it_works"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 # ============================================================
@@ -133,6 +177,19 @@ async def get_personal_invite_link(
 
 
 # ============================================================
+# יצירת קישור גישה חד-פעמי
+# ============================================================
+
+async def create_access_link(context):
+    access_link = await context.bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        member_limit=1
+    )
+
+    return access_link.invite_link
+
+
+# ============================================================
 # /start
 # ============================================================
 
@@ -168,15 +225,13 @@ async def start(
 
     if user_data.get("completed", False):
 
-        access_link = await context.bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            member_limit=1
-        )
+        access_link = await create_access_link(context)
 
         await update.message.reply_text(
             "כבר השלמת את המשימה 🎉\n\n"
             "הנה הקישור לערוץ:\n"
-            f"{access_link.invite_link}"
+            f"{access_link}",
+            reply_markup=get_main_keyboard()
         )
 
         save_data(data)
@@ -198,8 +253,105 @@ async def start(
         WELCOME_MESSAGE.format(
             link=personal_link,
             count=count
-        )
+        ),
+        reply_markup=get_main_keyboard()
     )
+
+    save_data(data)
+
+
+# ============================================================
+# כפתורי הבוט
+# ============================================================
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    if not query:
+        return
+
+    await query.answer()
+
+    user = query.from_user
+
+    if not user:
+        return
+
+    if not CHANNEL_ID:
+        await query.message.reply_text(
+            "הבוט עדיין לא מחובר לערוץ."
+        )
+        return
+
+    user_id = str(user.id)
+
+    data = load_data()
+
+    # ========================================================
+    # אם המשתמש עדיין לא קיים
+    # ========================================================
+
+    if user_id not in data["users"]:
+        data["users"][user_id] = {
+            "invited": [],
+            "completed": False
+        }
+
+    user_data = data["users"][user_id]
+
+    # ========================================================
+    # 🔗 הקישור שלי
+    # ========================================================
+
+    if query.data == "my_link":
+
+        personal_link = await get_personal_invite_link(
+            context,
+            user_id,
+            data
+        )
+
+        await query.message.reply_text(
+            f"🔗 הקישור האישי שלך:\n\n"
+            f"{personal_link}"
+        )
+
+    # ========================================================
+    # 📊 ההתקדמות שלי
+    # ========================================================
+
+    elif query.data == "my_progress":
+
+        count = len(
+            user_data.get("invited", [])
+        )
+
+        if user_data.get("completed", False):
+
+            await query.message.reply_text(
+                "🎉 כבר השלמת את המשימה!\n\n"
+                "התקדמות: 2/2"
+            )
+
+        else:
+
+            await query.message.reply_text(
+                f"📊 ההתקדמות שלך:\n\n"
+                f"{count}/2"
+            )
+
+    # ========================================================
+    # ℹ️ איך זה עובד?
+    # ========================================================
+
+    elif query.data == "how_it_works":
+
+        await query.message.reply_text(
+            HOW_IT_WORKS_MESSAGE
+        )
 
     save_data(data)
 
@@ -330,17 +482,15 @@ async def member_update(
         inviter_data["completed"] = True
 
         # יוצרים קישור כניסה חד-פעמי לערוץ
-        access_link = await context.bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            member_limit=1
-        )
+        access_link = await create_access_link(context)
 
         try:
             await context.bot.send_message(
                 chat_id=int(inviter_id),
                 text=SUCCESS_MESSAGE.format(
-                    link=access_link.invite_link
-                )
+                    link=access_link
+                ),
+                reply_markup=get_main_keyboard()
             )
 
         except Exception as error:
@@ -360,7 +510,8 @@ async def member_update(
                 chat_id=int(inviter_id),
                 text=PROGRESS_MESSAGE.format(
                     count=count
-                )
+                ),
+                reply_markup=get_main_keyboard()
             )
 
         except Exception as error:
@@ -405,7 +556,10 @@ async def main():
         .build()
     )
 
+    # ========================================================
     # /start
+    # ========================================================
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -413,7 +567,20 @@ async def main():
         )
     )
 
+    # ========================================================
+    # כפתורי Inline
+    # ========================================================
+
+    application.add_handler(
+        CallbackQueryHandler(
+            button_handler
+        )
+    )
+
+    # ========================================================
     # זיהוי הצטרפות לערוץ
+    # ========================================================
+
     application.add_handler(
         ChatMemberHandler(
             member_update,
