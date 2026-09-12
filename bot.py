@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
@@ -7,126 +8,269 @@ from telegram.ext import (
     CommandHandler,
     ChatMemberHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
+
+# ============================================================
+# הגדרות מערכת
+# בדרך כלל אין צורך לגעת כאן
+# ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-DETECTED_CHANNEL_ID = None
 
 DATA_FILE = "data.json"
 
 
+# ============================================================
+# הודעות
+#
+# בעתיד, אם תרצה לשנות את הטקסטים של הבוט,
+# תצטרך לערוך רק את החלק הזה.
+#
+# אפשר להשתמש ב:
+# {link}  = הקישור האישי
+# {count} = מספר האנשים שהצטרפו
+# ============================================================
+
+WELCOME_MESSAGE = """
+👋 ברוכים הבאים!
+
+כדי לקבל גישה לערוץ, צריך להזמין 2 אנשים חדשים.
+
+הקישור האישי שלך:
+{link}
+
+התקדמות: {count}/2
+"""
+
+PROGRESS_MESSAGE = """
+🔥 מישהו הצטרף דרך הקישור שלך!
+
+התקדמות: {count}/2
+"""
+
+SUCCESS_MESSAGE = """
+🎉 כל הכבוד!
+
+הזמנת 2 אנשים חדשים.
+
+הנה הקישור האישי שלך לערוץ:
+{link}
+"""
+
+
+# ============================================================
+# ניהול נתונים
+# ============================================================
+
+def empty_data():
+    return {
+        "users": {},
+        "invite_links": {}
+    }
+
+
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"users": {}, "invite_links": {}}
+        return empty_data()
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        if not isinstance(data, dict):
+            return empty_data()
+
+        data.setdefault("users", {})
+        data.setdefault("invite_links", {})
+
+        return data
+
+    except (json.JSONDecodeError, OSError):
+        print("Warning: Could not load data.json")
+        return empty_data()
 
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    temp_file = DATA_FILE + ".tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as file:
+        json.dump(
+            data,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(temp_file, DATA_FILE)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    data = load_data()
+# ============================================================
+# יצירת / קבלת קישור אישי
+# ============================================================
 
-    user_id = str(user.id)
+async def get_personal_invite_link(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: str,
+    data: dict
+):
+    # בודקים האם כבר קיים למשתמש קישור
+    for link, inviter_id in data["invite_links"].items():
+        if str(inviter_id) == user_id:
+            return link
 
-    if user_id not in data["users"]:
-        data["users"][user_id] = {
-            "invited": [],
-            "completed": False,
-        }
+    # אם אין קישור - יוצרים קישור חדש
+    invite = await context.bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        name=f"ref_{user_id}"
+    )
+
+    personal_link = invite.invite_link
+
+    data["invite_links"][personal_link] = user_id
+
+    return personal_link
+
+
+# ============================================================
+# /start
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if not update.effective_user or not update.message:
+        return
 
     if not CHANNEL_ID:
         await update.message.reply_text(
             "הבוט עדיין לא מחובר לערוץ. נסה שוב מאוחר יותר."
         )
-        save_data(data)
         return
 
-    if data["users"][user_id]["completed"]:
-        link = await context.bot.create_chat_invite_link(
+    user_id = str(update.effective_user.id)
+
+    data = load_data()
+
+    # אם המשתמש חדש - יוצרים לו רשומה
+    if user_id not in data["users"]:
+        data["users"][user_id] = {
+            "invited": [],
+            "completed": False
+        }
+
+    user_data = data["users"][user_id]
+
+    # ========================================================
+    # המשתמש כבר השלים את המשימה
+    # ========================================================
+
+    if user_data.get("completed", False):
+
+        access_link = await context.bot.create_chat_invite_link(
             chat_id=CHANNEL_ID,
-            member_limit=1,
+            member_limit=1
         )
 
         await update.message.reply_text(
             "כבר השלמת את המשימה 🎉\n\n"
-            f"הנה הקישור לערוץ:\n{link.invite_link}"
+            "הנה הקישור לערוץ:\n"
+            f"{access_link.invite_link}"
         )
+
+        save_data(data)
         return
 
-    # Create personal referral link
-    existing_link = None
+    # ========================================================
+    # המשתמש עדיין לא השלים
+    # ========================================================
 
-    for link, inviter_id in data["invite_links"].items():
-        if str(inviter_id) == user_id:
-            existing_link = link
-            break
+    personal_link = await get_personal_invite_link(
+        context,
+        user_id,
+        data
+    )
 
-    if existing_link:
-        referral_link = existing_link
-    else:
-        invite = await context.bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            name=f"ref_{user_id}",
-        )
-
-        referral_link = invite.invite_link
-        data["invite_links"][referral_link] = user_id
-
-    invited_count = len(data["users"][user_id]["invited"])
+    count = len(user_data.get("invited", []))
 
     await update.message.reply_text(
-        "ברוכים הבאים 👋\n\n"
-        "כדי לקבל גישה לערוץ, צריך להזמין 2 אנשים חדשים.\n\n"
-        f"הקישור האישי שלך:\n{referral_link}\n\n"
-        f"הוזמנו עד עכשיו: {invited_count}/2"
+        WELCOME_MESSAGE.format(
+            link=personal_link,
+            count=count
+        )
     )
 
     save_data(data)
 
 
-async def member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.chat_member:
-        return
+# ============================================================
+# זיהוי הצטרפות לערוץ
+# ============================================================
 
+async def member_update(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     chat_member = update.chat_member
 
-    # Only our channel
-    if CHANNEL_ID and str(chat_member.chat.id) != str(CHANNEL_ID):
+    if not chat_member:
         return
 
-    # Only when somebody joins
-    old_status = chat_member.old_chat_member.status
-    new_status = chat_member.new_chat_member.status
+    # ========================================================
+    # מוודאים שהאירוע שייך לערוץ שלנו
+    # ========================================================
 
-    if new_status not in ("member", "administrator"):
+    if not CHANNEL_ID:
         return
 
-    if old_status in ("member", "administrator"):
+    if str(chat_member.chat.id) != str(CHANNEL_ID):
         return
 
-    new_user = chat_member.new_chat_member.user
+    old_member = chat_member.old_chat_member
+    new_member = chat_member.new_chat_member
 
-    # Don't count bots
+    # ========================================================
+    # בודקים שהמשתמש באמת הפך לחבר
+    # ========================================================
+
+    if new_member.status not in (
+        "member",
+        "administrator"
+    ):
+        return
+
+    # אם הוא כבר היה חבר - לא סופרים אותו שוב
+    if old_member.status in (
+        "member",
+        "administrator"
+    ):
+        return
+
+    new_user = new_member.user
+
+    # לא סופרים בוטים
     if new_user.is_bot:
         return
+
+    # ========================================================
+    # חייב להיות קישור הזמנה
+    # ========================================================
 
     invite_link = chat_member.invite_link
 
     if not invite_link:
         return
 
+    invite_url = invite_link.invite_link
+
     data = load_data()
 
-    inviter_id = data["invite_links"].get(invite_link.invite_link)
+    # ========================================================
+    # מזהים למי שייך הקישור
+    # ========================================================
+
+    inviter_id = data["invite_links"].get(invite_url)
 
     if not inviter_id:
         return
@@ -134,99 +278,216 @@ async def member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inviter_id = str(inviter_id)
     new_user_id = str(new_user.id)
 
-    # Don't count self-referrals
+    # ========================================================
+    # משתמש לא יכול להזמין את עצמו
+    # ========================================================
+
     if inviter_id == new_user_id:
         return
+
+    # ========================================================
+    # המזמין חייב להיות רשום
+    # ========================================================
 
     if inviter_id not in data["users"]:
         return
 
-    invited = data["users"][inviter_id]["invited"]
+    inviter_data = data["users"][inviter_id]
 
-    # Don't count the same person twice
-    if new_user_id in invited:
+    # ========================================================
+    # אם המזמין כבר השלים - לא מוסיפים עוד אנשים
+    # ========================================================
+
+    if inviter_data.get("completed", False):
         return
 
-    invited.append(new_user_id)
+    invited_users = inviter_data.setdefault(
+        "invited",
+        []
+    )
 
-    count = len(invited)
+    # ========================================================
+    # אותו אדם לא יכול להיספר פעמיים
+    # ========================================================
 
-    if count >= 2 and not data["users"][inviter_id]["completed"]:
-        data["users"][inviter_id]["completed"] = True
+    if new_user_id in invited_users:
+        return
+
+    # ========================================================
+    # מוסיפים את המשתמש החדש
+    # ========================================================
+
+    invited_users.append(new_user_id)
+
+    count = len(invited_users)
+
+    # ========================================================
+    # הגיע ל-2
+    # ========================================================
+
+    if count >= 2:
+
+        inviter_data["completed"] = True
+
+        # יוצרים קישור כניסה חד-פעמי לערוץ
+        access_link = await context.bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            member_limit=1
+        )
 
         try:
-            access_link = await context.bot.create_chat_invite_link(
-                chat_id=CHANNEL_ID,
-                member_limit=1,
-            )
-
             await context.bot.send_message(
                 chat_id=int(inviter_id),
-                text=(
-                    "🎉 כל הכבוד!\n\n"
-                    "הזמנת 2 אנשים חדשים.\n"
-                    "הנה הקישור האישי שלך לערוץ:\n\n"
-                    f"{access_link.invite_link}"
-                ),
+                text=SUCCESS_MESSAGE.format(
+                    link=access_link.invite_link
+                )
             )
 
-        except Exception as e:
-            print("Error creating access link:", e)
+        except Exception as error:
+            print(
+                "Could not send success message:",
+                error
+            )
+
+    # ========================================================
+    # עדיין לא הגיע ל-2
+    # ========================================================
 
     else:
+
         try:
             await context.bot.send_message(
                 chat_id=int(inviter_id),
-                text=f"🔥 מישהו הצטרף דרך הקישור שלך!\n\n"
-                     f"התקדמות: {count}/2",
+                text=PROGRESS_MESSAGE.format(
+                    count=count
+                )
             )
-        except Exception:
-            pass
+
+        except Exception as error:
+            print(
+                "Could not send progress message:",
+                error
+            )
 
     save_data(data)
 
-async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("CHANNEL ID:", update.effective_chat.id)
-async def health(request):
-    return web.Response(text="Bot is running!")
 
+# ============================================================
+# Health Check ל-Render
+# ============================================================
+
+async def health(request):
+    return web.Response(
+        text="Bot is running!"
+    )
+
+
+# ============================================================
+# הפעלת הבוט
+# ============================================================
 
 async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is missing"
+        )
+
+    if not CHANNEL_ID:
+        raise RuntimeError(
+            "CHANNEL_ID is missing"
+        )
+
+    application = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # /start
     application.add_handler(
-    MessageHandler(filters.UpdateType.CHANNEL_POST, channel_post)
-)
-    application.add_handler(
-        ChatMemberHandler(
-            member_update,
-            ChatMemberHandler.CHAT_MEMBER,
+        CommandHandler(
+            "start",
+            start
         )
     )
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(
-        allowed_updates=["message", "chat_member", "channel_post"]
+    # זיהוי הצטרפות לערוץ
+    application.add_handler(
+        ChatMemberHandler(
+            member_update,
+            ChatMemberHandler.CHAT_MEMBER
+        )
     )
 
+    # ========================================================
+    # הפעלת Telegram
+    # ========================================================
+
+    await application.initialize()
+    await application.start()
+
+    await application.updater.start_polling(
+        allowed_updates=[
+            "message",
+            "chat_member"
+        ]
+    )
+
+    # ========================================================
+    # שרת קטן עבור Render
+    # ========================================================
+
     app = web.Application()
-    app.router.add_get("/", health)
+
+    app.router.add_get(
+        "/",
+        health
+    )
 
     runner = web.AppRunner(app)
+
     await runner.setup()
 
-    port = int(os.environ.get("PORT", 10000))
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
     await site.start()
 
-    print(f"Bot is running on port {port}")
+    print(
+        f"Bot is running on port {port}"
+    )
 
-    await asyncio.Event().wait()
+    # ========================================================
+    # משאיר את הבוט פעיל
+    # ========================================================
 
+    try:
+        await asyncio.Event().wait()
+
+    finally:
+
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+        await runner.cleanup()
+
+
+# ============================================================
+# Start
+# ============================================================
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
