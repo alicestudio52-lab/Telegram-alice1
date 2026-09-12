@@ -1,15 +1,24 @@
 import os
 import json
 import asyncio
+
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.error import Forbidden
+
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
+
 
 # ============================================================
 # הגדרות מערכת
@@ -20,16 +29,23 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
 DATA_FILE = "data.json"
 
+# Render מספק את כתובת השירות באופן אוטומטי.
+# אם לא קיימת, אפשר להגדיר WEBHOOK_URL ידנית ב-Render.
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+WEBHOOK_PATH = "/telegram"
+
 
 # ============================================================
 # הודעות
 #
-# בעתיד, אם תרצה לשנות את הטקסטים,
+# בעתיד, אם תרצה לשנות טקסטים,
 # תצטרך לערוך רק את החלק הזה.
 #
 # אפשר להשתמש ב:
 # {link}  = הקישור האישי
-# {count} = מספר האנשים שהתחילו דרך הקישור
+# {count} = מספר האנשים שהתחילו דרך הקישור שלך
 # ============================================================
 
 WELCOME_MESSAGE = """
@@ -168,11 +184,6 @@ def save_data(data):
 
 # ============================================================
 # יצירת קישור אישי לבוט
-#
-# זה כבר לא קישור לקבוצה.
-#
-# לדוגמה:
-# https://t.me/AliceBot?start=ref_123456789
 # ============================================================
 
 async def get_personal_link(
@@ -184,15 +195,18 @@ async def get_personal_link(
     bot_username = bot_info.username
 
     if not bot_username:
-        raise RuntimeError("Bot username could not be detected")
+        raise RuntimeError(
+            "Bot username could not be detected"
+        )
 
-    return f"https://t.me/{bot_username}?start=ref_{user_id}"
+    return (
+        f"https://t.me/{bot_username}"
+        f"?start=ref_{user_id}"
+    )
 
 
 # ============================================================
 # יצירת קישור גישה חד-פעמי לקבוצה
-#
-# הקישור הזה נוצר רק אחרי 2/2
 # ============================================================
 
 async def create_access_link(
@@ -207,7 +221,7 @@ async def create_access_link(
 
 
 # ============================================================
-# הוספת משתמש חדש
+# יצירת משתמש
 # ============================================================
 
 def create_user():
@@ -220,12 +234,6 @@ def create_user():
 
 # ============================================================
 # עיבוד Referral
-#
-# אם משתמש חדש הגיע דרך:
-# /start ref_123456789
-#
-# אנחנו מזהים שהמזמין הוא 123456789
-# ומוסיפים את המשתמש החדש אליו.
 # ============================================================
 
 async def process_referral(
@@ -289,14 +297,16 @@ async def process_referral(
     count = len(invited_users)
 
     # ========================================================
-    # הגיע ל־2/2
+    # הגיע ל-2/2
     # ========================================================
 
     if count >= 2:
 
         inviter_data["completed"] = True
 
-        access_link = await create_access_link(context)
+        access_link = await create_access_link(
+            context
+        )
 
         try:
             await context.bot.send_message(
@@ -320,7 +330,7 @@ async def process_referral(
             )
 
     # ========================================================
-    # עדיין לא הגיע ל־2
+    # עדיין לא הגיע ל-2
     # ========================================================
 
     else:
@@ -364,7 +374,9 @@ async def start(
         )
         return
 
-    user_id = str(update.effective_user.id)
+    user_id = str(
+        update.effective_user.id
+    )
 
     data = load_data()
 
@@ -380,8 +392,7 @@ async def start(
     user_data = data["users"][user_id]
 
     # ========================================================
-    # אם זה משתמש חדש:
-    # קודם מעבדים את ה-referral
+    # אם משתמש חדש - מעבדים Referral
     # ========================================================
 
     if is_new_user:
@@ -392,7 +403,7 @@ async def start(
             user_id
         )
 
-    # שומרים את הנתונים אחרי עיבוד ההזמנה
+    # שומרים נתונים
     save_data(data)
 
     # ========================================================
@@ -401,7 +412,9 @@ async def start(
 
     if user_data.get("completed", False):
 
-        access_link = await create_access_link(context)
+        access_link = await create_access_link(
+            context
+        )
 
         try:
             await update.message.reply_text(
@@ -447,7 +460,7 @@ async def start(
 
 
 # ============================================================
-# כפתורי הבוט
+# טיפול בכפתורים
 # ============================================================
 
 async def button_handler(
@@ -466,6 +479,7 @@ async def button_handler(
 
     try:
         await query.answer()
+
     except Exception as error:
         print(
             "Could not answer callback query:",
@@ -484,6 +498,7 @@ async def button_handler(
             )
         except Exception:
             pass
+
         return
 
     user_id = str(user.id)
@@ -500,7 +515,7 @@ async def button_handler(
     user_data = data["users"][user_id]
 
     # ========================================================
-    # 🔗 הקישור שלי
+    # הקישור שלי
     # ========================================================
 
     if query.data == "my_link":
@@ -515,13 +530,14 @@ async def button_handler(
                 f"🔗 הקישור האישי שלך:\n\n"
                 f"{personal_link}"
             )
+
         except Forbidden:
             print(
                 f"User {user_id} blocked the bot."
             )
 
     # ========================================================
-    # 📊 ההתקדמות שלי
+    # ההתקדמות שלי
     # ========================================================
 
     elif query.data == "my_progress":
@@ -537,6 +553,7 @@ async def button_handler(
                     "🎉 כבר השלמת את המשימה!\n\n"
                     "התקדמות: 2/2"
                 )
+
             except Forbidden:
                 print(
                     f"User {user_id} blocked the bot."
@@ -549,13 +566,14 @@ async def button_handler(
                     f"📊 ההתקדמות שלך:\n\n"
                     f"{count}/2"
                 )
+
             except Forbidden:
                 print(
                     f"User {user_id} blocked the bot."
                 )
 
     # ========================================================
-    # ℹ️ איך זה עובד?
+    # איך זה עובד
     # ========================================================
 
     elif query.data == "how_it_works":
@@ -564,6 +582,7 @@ async def button_handler(
             await query.message.reply_text(
                 HOW_IT_WORKS_MESSAGE
             )
+
         except Forbidden:
             print(
                 f"User {user_id} blocked the bot."
@@ -583,6 +602,39 @@ async def health(request):
 
 
 # ============================================================
+# Webhook של Telegram
+# ============================================================
+
+async def telegram_webhook(request):
+    try:
+        data = await request.json()
+
+        update = Update.de_json(
+            data,
+            request.app["telegram_application"].bot
+        )
+
+        await request.app[
+            "telegram_application"
+        ].process_update(update)
+
+        return web.Response(
+            text="OK"
+        )
+
+    except Exception as error:
+        print(
+            "Webhook error:",
+            repr(error)
+        )
+
+        return web.Response(
+            text="Internal Server Error",
+            status=500
+        )
+
+
+# ============================================================
 # הפעלת הבוט
 # ============================================================
 
@@ -598,6 +650,10 @@ async def main():
             "CHANNEL_ID is missing"
         )
 
+    # ========================================================
+    # יצירת Telegram Application
+    # ========================================================
+
     application = (
         Application
         .builder()
@@ -606,7 +662,7 @@ async def main():
     )
 
     # ========================================================
-    # /start
+    # Handlers
     # ========================================================
 
     application.add_handler(
@@ -616,10 +672,6 @@ async def main():
         )
     )
 
-    # ========================================================
-    # כפתורי Inline
-    # ========================================================
-
     application.add_handler(
         CallbackQueryHandler(
             button_handler
@@ -627,28 +679,28 @@ async def main():
     )
 
     # ========================================================
-    # הפעלת Telegram
+    # אתחול Telegram Application
     # ========================================================
 
     await application.initialize()
     await application.start()
 
-    await application.updater.start_polling(
-        allowed_updates=[
-            "message",
-            "callback_query"
-        ]
-    )
-
     # ========================================================
-    # שרת קטן עבור Render
+    # יצירת שרת HTTP
     # ========================================================
 
     app = web.Application()
 
+    app["telegram_application"] = application
+
     app.router.add_get(
         "/",
         health
+    )
+
+    app.router.add_post(
+        WEBHOOK_PATH,
+        telegram_webhook
     )
 
     runner = web.AppRunner(app)
@@ -658,7 +710,7 @@ async def main():
     port = int(
         os.environ.get(
             "PORT",
-            10000
+            "10000"
         )
     )
 
@@ -670,21 +722,69 @@ async def main():
 
     await site.start()
 
+    # ========================================================
+    # קביעת כתובת ה-Webhook
+    # ========================================================
+
+    base_url = (
+        WEBHOOK_URL
+        or RENDER_EXTERNAL_URL
+    )
+
+    if not base_url:
+        raise RuntimeError(
+            "Could not determine webhook URL. "
+            "Set WEBHOOK_URL in Render."
+        )
+
+    base_url = base_url.rstrip("/")
+
+    webhook_url = (
+        f"{base_url}{WEBHOOK_PATH}"
+    )
+
+    print(
+        f"Setting Telegram webhook: {webhook_url}"
+    )
+
+    await application.bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=[
+            "message",
+            "callback_query"
+        ],
+        drop_pending_updates=False
+    )
+
     print(
         f"Bot is running on port {port}"
     )
 
+    print(
+        "Telegram webhook is active."
+    )
+
     # ========================================================
-    # משאיר את הבוט פעיל
+    # משאיר את השירות פעיל
     # ========================================================
 
     try:
-
         await asyncio.Event().wait()
 
     finally:
 
-        await application.updater.stop()
+        print(
+            "Shutting down bot..."
+        )
+
+        try:
+            await application.bot.delete_webhook()
+        except Exception as error:
+            print(
+                "Could not delete webhook:",
+                error
+            )
+
         await application.stop()
         await application.shutdown()
 
