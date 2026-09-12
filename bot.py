@@ -614,11 +614,12 @@ async def main():
     await application.start()
 
     await application.updater.start_polling(
-        allowed_updates=[
-            "message",
-            "chat_member"
-        ]
-    )
+    allowed_updates=[
+        "message",
+        "chat_member",
+        "callback_query"
+    ]
+)
 
     # ========================================================
     # שרת קטן עבור Render
